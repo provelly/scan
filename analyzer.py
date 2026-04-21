@@ -1,13 +1,5 @@
 """
-analyzer.py — 주입 지점 분석기 (통합)
-
-[통합 이력]
-  - 조원 코드(analyzer.py) 를 core/models.py 의 통합 모델(ScanTarget)에 맞게 이식.
-  - 주요 필드명 변경:
-      ScanTarget.name      → param
-      ScanTarget.base_data → extra  (원본 파라미터 전체 dict)
-  - models.py 위치: core/models.py  (루트의 models.py 대신)
-  - CrawledPage / FormDef / FieldDef 도 core/models.py 로 일원화됨.
+analyzer.py — 주입 지점 분석기
 
 두 가지 입력 소스를 모두 지원:
   1. parse_request(crawl_data: dict)
@@ -60,9 +52,9 @@ class Analyzer:
         raw_body = crawl_data.get("body", "")
 
         # ── URL 쿼리 파라미터 ─────────────────────────────────────
-        parsed_url  = urlparse.urlparse(url)
-        base_url    = url.split("?")[0]
-        all_query   = {k: v[0] for k, v in urlparse.parse_qs(parsed_url.query).items()}
+        parsed_url = urlparse.urlparse(url)
+        base_url   = url.split("?")[0]
+        all_query  = {k: v[0] for k, v in urlparse.parse_qs(parsed_url.query).items()}
 
         for name in all_query:
             targets.append(ScanTarget(
@@ -70,7 +62,7 @@ class Analyzer:
                 url      = base_url,
                 method   = method,
                 param    = name,
-                extra    = dict(all_query),   # 나머지 파라미터 원본값 포함
+                extra    = dict(all_query),
                 found_on = url,
             ))
 
@@ -88,7 +80,7 @@ class Analyzer:
                 ))
 
         # ── 쿠키 / 헤더 ──────────────────────────────────────────
-        for h_name, _h_val in headers.items():
+        for h_name in headers:
             pos = "cookie" if h_name.lower() == "cookie" else "header"
             targets.append(ScanTarget(
                 position = pos,
