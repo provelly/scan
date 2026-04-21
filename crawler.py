@@ -1,20 +1,11 @@
 """
 crawler.py — 비동기 웹 크롤러
-
-aiohttp 기반으로 링크 / 폼 / 쿼리 파라미터를 수집한다.
-반환값(list[CrawledPage])은 Analyzer.build_targets() 로 직접 전달 가능.
-
-[통합 이력]
-  - from models import ... → from core.models import ... 로 변경
-  - FormField / CrawledForm → core.models 의 FieldDef / FormDef 로 통일
-  - CrawledPage 생성 시 통합 모델 필드명 사용
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections import deque
 from typing import Optional
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -22,9 +13,6 @@ import aiohttp
 from bs4 import BeautifulSoup
 
 from core.models import FieldDef, FormDef, CrawledPage
-
-
-# ── 링크 추출기 ─────────────────────────────────────────
 
 class LinkExtractor:
     LINK_ATTRS = {
@@ -50,16 +38,7 @@ class LinkExtractor:
         return list(set(links))
 
 
-# ── 폼 추출기 ───────────────────────────────────────────
-
 class FormExtractor:
-    """HTML 폼을 파싱해 FormDef(FieldDef 목록 포함)를 반환한다."""
-
-    INJECTABLE_TYPES = {
-        "text", "password", "email", "search", "url",
-        "number", "tel", "hidden", "textarea",
-    }
-
     def extract(self, html: str, base_url: str) -> list[FormDef]:
         soup  = BeautifulSoup(html, "html.parser")
         forms: list[FormDef] = []
@@ -78,19 +57,14 @@ class FormExtractor:
 
     def _extract_fields(self, form_tag) -> list[FieldDef]:
         fields: list[FieldDef] = []
-
-        # <input>
         for inp in form_tag.find_all("input"):
             name = inp.get("name", "")
-            if not name:
-                continue
-            fields.append(FieldDef(
-                name       = name,
-                field_type = (inp.get("type") or "text").lower(),
-                value      = inp.get("value", ""),
-            ))
-
-        # <textarea>
+            if name:
+                fields.append(FieldDef(
+                    name       = name,
+                    field_type = (inp.get("type") or "text").lower(),
+                    value      = inp.get("value", ""),
+                ))
         for ta in form_tag.find_all("textarea"):
             name = ta.get("name", "")
             if name:
@@ -99,8 +73,6 @@ class FormExtractor:
                     field_type = "textarea",
                     value      = ta.get_text(),
                 ))
-
-        # <select>
         for sel in form_tag.find_all("select"):
             name = sel.get("name", "")
             if name:
@@ -110,62 +82,10 @@ class FormExtractor:
                     field_type = "select",
                     options    = opts,
                 ))
-
         return fields
 
 
-# ── URL 큐 ──────────────────────────────────────────────
-
-class URLQueue:
-    """BFS 기반 URL 큐 — 중복 제거 / 도메인 필터 / 깊이 제한"""
-
-    def __init__(self, base_url: str, max_depth: int = 3):
-        self.target_domain = urlparse(base_url).netloc
-        self.max_depth     = max_depth
-        self._queue:   deque[tuple[str, int]] = deque()
-        self._visited: set[str]               = set()
-
-    def push(self, url: str, depth: int) -> None:
-        normalized = url.split("#")[0].rstrip("/")
-        if (
-            normalized in self._visited
-            or urlparse(normalized).netloc != self.target_domain
-            or depth > self.max_depth
-        ):
-            return
-        self._visited.add(normalized)
-        self._queue.append((normalized, depth))
-
-    def pop(self) -> Optional[tuple[str, int]]:
-        return self._queue.popleft() if self._queue else None
-
-    def is_empty(self) -> bool:
-        return not self._queue
-
-    def visited_count(self) -> int:
-        return len(self._visited)
-
-
-# ── 웹 크롤러 ───────────────────────────────────────────
-
 class WebCrawler:
-    """
-    비동기 BFS 웹 크롤러.
-
-    반환값 list[CrawledPage] 는 Analyzer.build_targets() 로 바로 전달 가능.
-
-    Example
-    -------
-    crawler  = WebCrawler("https://example.com", max_depth=2)
-    pages    = asyncio.run(crawler.crawl())
-
-    analyzer = Analyzer()
-    targets  = analyzer.build_targets(pages)
-
-    engine   = ScanEngine()
-    results  = engine.run(targets)
-    """
-
     DEFAULT_HEADERS = {
         "User-Agent":      "Mozilla/5.0 (compatible; VulnScanner/2.0)",
         "Accept":          "text/html,application/xhtml+xml,*/*;q=0.8",
@@ -182,20 +102,23 @@ class WebCrawler:
         timeout:       int   = 10,
     ):
         self.start_url     = start_url
+        self.max_depth     = max_depth
         self.max_pages     = max_pages
         self.concurrency   = concurrency
         self.request_delay = request_delay
         self.timeout       = aiohttp.ClientTimeout(total=timeout)
-        self.queue         = URLQueue(start_url, max_depth=max_depth)
+        self.target_domain = urlparse(start_url).netloc
+        
         self.link_ex       = LinkExtractor()
         self.form_ex       = FormExtractor()
-        self.results: list[CrawledPage]    = []
-        self._sem:    asyncio.Semaphore | None = None
+        self.results: list[CrawledPage] = []
+        self._visited: set[str]         = set()
         self.logger        = logging.getLogger("WebCrawler")
 
     async def crawl(self) -> list[CrawledPage]:
-        self._sem = asyncio.Semaphore(self.concurrency)
-        self.queue.push(self.start_url, depth=0)
+        # 워커 패턴용 큐 도입
+        self.queue = asyncio.Queue()
+        self._enqueue(self.start_url, 0)
 
         connector = aiohttp.TCPConnector(ssl=False)
         async with aiohttp.ClientSession(
@@ -203,36 +126,51 @@ class WebCrawler:
             connector = connector,
             timeout   = self.timeout,
         ) as session:
-            tasks: list = []
-            while not self.queue.is_empty() and len(self.results) < self.max_pages:
-                url, depth = self.queue.pop()
-                tasks.append(self._crawl_page(session, url, depth))
-                if len(tasks) >= self.concurrency or self.queue.is_empty():
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                    tasks = []
-                    await asyncio.sleep(self.request_delay)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            workers = [
+                asyncio.create_task(self._worker(session))
+                for _ in range(self.concurrency)
+            ]
+            
+            await self.queue.join()
+
+            for w in workers:
+                w.cancel()
 
         self.logger.info(
             "크롤링 완료 — 페이지 %d개 / 방문 URL %d개",
-            len(self.results), self.queue.visited_count(),
+            len(self.results), len(self._visited)
         )
         return self.results
 
-    async def _crawl_page(
-        self,
-        session: aiohttp.ClientSession,
-        url:     str,
-        depth:   int,
-    ) -> None:
-        async with self._sem:
+    def _enqueue(self, url: str, depth: int):
+        normalized = url.split("#")[0].rstrip("/")
+        if (
+            normalized not in self._visited
+            and urlparse(normalized).netloc == self.target_domain
+            and depth <= self.max_depth
+        ):
+            self._visited.add(normalized)
+            self.queue.put_nowait((normalized, depth))
+
+    async def _worker(self, session: aiohttp.ClientSession):
+        while True:
+            url, depth = await self.queue.get()
+            
+            if len(self.results) >= self.max_pages:
+                self.queue.task_done()
+                continue
+                
             try:
                 self.logger.info("[depth=%d] %s", depth, url)
                 async with session.get(url, allow_redirects=True) as resp:
                     await self._process_response(resp, url, depth)
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                 self.logger.warning("실패 (%s): %s", url, e)
+            finally:
+                self.queue.task_done()
+                if self.request_delay > 0:
+                    await asyncio.sleep(self.request_delay)
 
     async def _process_response(
         self,
@@ -241,7 +179,7 @@ class WebCrawler:
         depth:    int,
     ) -> None:
         content_type = response.headers.get("Content-Type", "")
-        links: list[str]    = []
+        links: list[str]     = []
         forms: list[FormDef] = []
 
         if "text/html" in content_type:
@@ -249,14 +187,13 @@ class WebCrawler:
             links = self.link_ex.extract(html, url)
             forms = self.form_ex.extract(html, url)
             for link in links:
-                self.queue.push(link, depth + 1)
+                self._enqueue(link, depth + 1)
 
         query_params: dict[str, str] = {
             k: (v[0] if v else "")
             for k, v in parse_qs(urlparse(url).query).items()
         }
 
-        # ── CrawledPage 생성 (통합 모델 필드 사용) ──
         self.results.append(CrawledPage(
             url              = url,
             query_params     = query_params,

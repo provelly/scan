@@ -3,8 +3,6 @@ core/matcher.py
 
 템플릿의 matchers[] 를 평가한다.
 지원 타입 : word / time / status / regex / size
-
-새로운 타입 추가 시 : _EVALUATORS 딕셔너리에 함수 하나만 등록하면 됨.
 """
 
 from __future__ import annotations
@@ -16,12 +14,6 @@ import requests
 
 from core.models import MatcherResult
 from core.template_loader import MatcherDef, ScanTemplate
-
-
-# ──────────────────────────────────────────────
-# 개별 매처 평가 함수
-# fn(defn, response, elapsed) -> MatcherResult
-# ──────────────────────────────────────────────
 
 _EvalFn = Callable[
     [MatcherDef, requests.Response | None, float],
@@ -38,8 +30,8 @@ def _eval_word(defn: MatcherDef, resp: requests.Response | None, _elapsed: float
 
     if defn.condition == "and":
         found = [w for w in words if w in body]
-        hit   = len(found) == len(words)
-    else:  # or
+        hit   = len(found) == len(words) and len(words) > 0
+    else:
         found = [w for w in words if w in body]
         hit   = len(found) > 0
 
@@ -64,7 +56,7 @@ def _eval_status(defn: MatcherDef, resp: requests.Response | None, _elapsed: flo
     actual = resp.status_code
 
     if defn.condition == "and":
-        hit = all(actual == c for c in codes)   # 사실상 단일 코드 비교용
+        hit = all(actual == c for c in codes) and len(codes) > 0
     else:
         hit = actual in codes
 
@@ -79,10 +71,19 @@ def _eval_regex(defn: MatcherDef, resp: requests.Response | None, _elapsed: floa
 
     body     = resp.text
     patterns = defn.data.get("regex", [])
-    matched  = [p for p in patterns if re.search(p, body)]
+    matched  = []
+    
+    # 정규식 문법 오류 방어
+    for p in patterns:
+        try:
+            if re.search(p, body):
+                matched.append(p)
+        except re.error as e:
+            print(f"[WARN] Invalid regex pattern {p!r}: {e}")
+            continue
 
     if defn.condition == "and":
-        hit = len(matched) == len(patterns)
+        hit = len(matched) == len(patterns) and len(patterns) > 0
     else:
         hit = len(matched) > 0
 
@@ -99,7 +100,7 @@ def _eval_size(defn: MatcherDef, resp: requests.Response | None, _elapsed: float
     sizes    = [int(s) for s in defn.data.get("size", [])]
 
     if defn.condition == "and":
-        hit = all(body_len == s for s in sizes)
+        hit = all(body_len == s for s in sizes) and len(sizes) > 0
     else:
         hit = body_len in sizes
 
@@ -107,8 +108,6 @@ def _eval_size(defn: MatcherDef, resp: requests.Response | None, _elapsed: float
         hit = not hit
     return MatcherResult(hit=hit, mtype="size", detail=[str(body_len)])
 
-
-# ── 레지스트리 ─────────────────────────────────
 
 _EVALUATORS: dict[str, _EvalFn] = {
     "word":   _eval_word,
@@ -119,25 +118,16 @@ _EVALUATORS: dict[str, _EvalFn] = {
 }
 
 
-# ──────────────────────────────────────────────
-# 공개 API
-# ──────────────────────────────────────────────
-
 def evaluate_matchers(
     template: ScanTemplate,
     response: requests.Response | None,
     elapsed:  float,
 ) -> tuple[bool, list[MatcherResult]]:
-    """
-    템플릿의 모든 matchers를 평가하고
-    (전체 판정 bool, 개별 결과 리스트) 를 반환.
-    """
     results: list[MatcherResult] = []
 
     for defn in template.matchers:
         fn = _EVALUATORS.get(defn.type)
         if fn is None:
-            # 알 수 없는 매처 타입은 경고 후 스킵
             print(f"[WARN] Unknown matcher type: {defn.type!r} — skipped")
             continue
         results.append(fn(defn, response, elapsed))
@@ -147,7 +137,7 @@ def evaluate_matchers(
 
     if template.matchers_condition == "and":
         overall = all(r.hit for r in results)
-    else:  # or
+    else:
         overall = any(r.hit for r in results)
 
     return overall, results

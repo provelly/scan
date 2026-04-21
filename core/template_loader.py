@@ -3,25 +3,10 @@ core/template_loader.py
 
 /templates/<category>/<name>.yaml 구조를 재귀 탐색해
 ScanTemplate 목록으로 파싱한다.
-
-디렉터리 구조 예시:
-  templates/
-    sqli/
-      error-based.yaml
-      time-based.yaml
-    xss/
-      reflected.yaml
-      stored.yaml
-    traversal/
-      unix.yaml
-      windows.yaml
-    ssrf/
-      basic.yaml
 """
 
 from __future__ import annotations
 
-import re
 import yaml
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,17 +15,11 @@ from typing import Literal
 from core.models import Method, Position
 
 
-# ──────────────────────────────────────────────
-# 템플릿 데이터 클래스
-# ──────────────────────────────────────────────
-
 @dataclass
 class MatcherDef:
-    """YAML matchers[] 항목 하나를 그대로 보관."""
-    type:    str                          # word / time / status / regex / size
-    data:    dict                         # type 에 따라 내용이 다름
-    # 공통 옵션
-    condition: Literal["or", "and"] = "or"   # 항목 내부 복수 값 처리
+    type:    str
+    data:    dict
+    condition: Literal["or", "and"] = "or"
     negate:    bool                 = False
 
 
@@ -50,7 +29,7 @@ class ScanTemplate:
     name:                str
     severity:            str
     description:         str
-    category:            str                    # 디렉터리명 (sqli / xss / ...)
+    category:            str
     source_path:         Path
 
     allowed_methods:     list[Method]
@@ -58,17 +37,12 @@ class ScanTemplate:
 
     payloads:            list[str]
     matchers:            list[MatcherDef]
-    matchers_condition:  Literal["or", "and"]   # 매처 간 조합 방식
+    matchers_condition:  Literal["or", "and"]
 
-    # 요청 커스터마이즈 (템플릿 선택 사항)
     headers:             dict[str, str]  = field(default_factory=dict)
     follow_redirects:    bool            = True
     max_redirects:       int             = 5
 
-
-# ──────────────────────────────────────────────
-# 파서
-# ──────────────────────────────────────────────
 
 def _parse_matcher(raw: dict) -> MatcherDef:
     return MatcherDef(
@@ -98,8 +72,9 @@ def _parse_template(path: Path, category: str) -> ScanTemplate:
         allowed_methods    = [m.upper() for m in defn.get("method", ["GET", "POST"])],
         allowed_positions  = defn.get("position", ["query", "body"]),
 
-        payloads           = raw.get("payloads", []),
-        matchers           = [_parse_matcher(m) for m in raw.get("matchers", [])],
+        # 방어 코드 추가: 값이 None일 경우 빈 리스트로 초기화
+        payloads           = raw.get("payloads") or [],
+        matchers           = [_parse_matcher(m) for m in (raw.get("matchers") or [])],
         matchers_condition = raw.get("matchers-condition", "or").lower(),
 
         headers            = raw.get("headers", {}),
@@ -108,24 +83,11 @@ def _parse_template(path: Path, category: str) -> ScanTemplate:
     )
 
 
-# ──────────────────────────────────────────────
-# 공개 API
-# ──────────────────────────────────────────────
-
 def load_templates(
     templates_root: str | Path = "templates",
-    categories:     list[str] | None = None,   # None 이면 전체 로드
-    template_ids:   list[str] | None = None,   # 특정 ID만 필터
+    categories:     list[str] | None = None,
+    template_ids:   list[str] | None = None,
 ) -> list[ScanTemplate]:
-    """
-    templates_root 하위를 재귀 탐색해 ScanTemplate 리스트 반환.
-
-    Parameters
-    ----------
-    templates_root : 템플릿 루트 디렉터리 (기본값 "templates/")
-    categories     : ['sqli', 'xss'] 처럼 대분류 지정. None 이면 전체.
-    template_ids   : ['sqli-error-based'] 처럼 특정 템플릿 ID만 로드.
-    """
     root     = Path(templates_root)
     result   : list[ScanTemplate] = []
     errors   : list[str]          = []
@@ -141,6 +103,7 @@ def load_templates(
         if categories and cat not in categories:
             continue
 
+        # .yaml 파일로 통일된 형식 탐색
         for yaml_file in sorted(category_dir.glob("**/*.yaml")):
             try:
                 tmpl = _parse_template(yaml_file, cat)
