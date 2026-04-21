@@ -1,0 +1,34 @@
+id: xss-reflected # 고유 ID (ScanResult.template_id 에 표시됨)
+info:
+  name: 'Reflected XSS Scan'
+  severity: 'high' # critical / high / medium / low / info
+  description: '반사형 XSS 탐지'
+
+definition:
+  method: ['GET', 'POST'] # 허용 HTTP 메서드
+  position: ['query', 'body', 'form_field'] # 허용 주입 위치
+
+payloads:
+  - '<script>alert(1)</script>'
+  - '"><img src=x onerror=alert(1)>'
+
+matchers-condition: or # or: 하나라도 일치 / and: 모두 일치
+
+matchers:
+  - type: word # 응답 본문 키워드 검사
+    words:
+      - '<script>alert(1)</script>'
+      - 'onerror=alert(1)'
+
+  - type: status # HTTP 상태코드 검사
+    status: [200]
+
+  - type: regex # 정규식 검사
+    regex:
+      - 'root:[x*]:0:0'
+
+  - type: time # 응답 지연 검사 (초)
+    delay: 5
+
+  - type: size # 응답 본문 크기 검사 (bytes)
+    size: [1337]

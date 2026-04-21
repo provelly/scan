@@ -1,0 +1,31 @@
+id: sqli-injection
+info:
+  name: 'SQL Injection Scan'
+  severity: 'critical' # 결과 시각화 및 리포트용 (나중에 데이터 추출 용이)
+  description: 'DB 에러 및 시간 지연을 이용한 통합 SQLi 스캔'
+
+# 엔진이 공격을 수행할지 말지 결정하는 필터링 조건
+definition:
+  method: ['GET', 'POST', 'PUT']
+  position: ['query', 'body', 'cookie', 'header']
+
+payloads:
+  - "' OR 1=1--" # 에러 유도용
+  - 'sleep(5)' # 시간 지연용
+
+matchers-condition: or
+
+matchers:
+  - type: word
+    words: [
+        'SQL syntax',
+        'mysql_fetch',
+        'SQL syntax',
+        'mysql_fetch_array()',
+        'PostgreSQL query error',
+        'Microsoft OLE DB Provider for SQL Server',
+        'ORA-01756', # Oracle 에러 코드
+        'driver stack trace',
+      ]
+  - type: time
+    delay: 5
